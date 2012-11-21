@@ -34,9 +34,13 @@ Added first version of pluggable reporter packages
 type tVar2000 is table of varchar2(2000) index by binary_integer;
 
 gn_nb number := 0;
-gv_version varchar2(100) := 'iAS Web GUI for utPLSQL version 0.2';
+gv_version varchar2(100) := 'iAS Web GUI for utPLSQL version 0.3';
 gv_author varchar2(100) := '<a href="http://www.laclasse.com/">by Pierre-Gilles Levallois</a>';
 gv_current_testing varchar2(2000) := '-';
+gn_current_nb_failure number := 0;
+gn_current_nb_success number := 0;
+gn_total_fail number := 0;
+gn_total_success number := 0;
 tHtml tVar2000;
 
 ----------------------------------------------------------------------------
@@ -62,6 +66,20 @@ begin
   htp.P('</fieldset>');
 end displaySupplement;
 
+----------------------------------------------------------------------------
+-- displayPercentage : displays percentage total of successed tests
+----------------------------------------------------------------------------
+procedure displayPercentage is
+begin
+    htp.p('<script>
+    var pct = "'||to_char(round(100* gn_total_success / (gn_total_success + gn_total_fail), 2))||'% passed.";
+    o = document.getElementById("totalpct");
+    o.innerHTML=pct;
+    </script>');
+exception
+when others then
+    htp.p(sqlerrm);
+end;
 ----------------------------------------------------------------------------
 -- header of the html page.
 ----------------------------------------------------------------------------
@@ -118,17 +136,21 @@ begin
   htp.p('<style>
 		  body, table, tr, td {margin: 0; padding: 0;font-family: Verdana,Arial,Helvetica,sans-serif;font-size: 11px;text-decoration: none;color: black;}
 		  #container{margin:3px;}
+          #totalpct {font-size:13px;margin-left:20px;}
 		  .coulfond {background-color: #cfcfbc;}					  
 		  .warn, .title {color:orange;font-weight:bold;}
 		  .ok {color:green;font-weight:bold;}
 		  .ko {color:red;font-weight:bold;}
 		  table#tabData1 {border:1px solid black; clear:both;}
-		  .nb{font-size:6px;}
+          table#tabData1 tr td {padding:1px;}
+		  .nb{font-size:6px; text-align:right;vertical-align:top;}
+          .status, .counttest {vertical-align:top;}
 		  .Pair {background-color: #E9e9e7;}
 		  .Impair {background-color: #F5FCC5;}
+          .counttest {text-align:right;border-top:1px dotted #C0C0C0;}
 		  #foot, #head, .head {background-color:#666666; color:white; height:16px; text-align:center;padding-top:2px;}
 		  #version{font-weight:bold}
-		  #author, #author a {color:black;}
+		  #author, #author a {color:lightblue;}
 		  #conf {width:40%;float:right;border:1px solid orange;margin:5px 0px 5px 0px;}
           fieldset {width:55%;}
           fieldset * {padding-left:20px;}
@@ -203,14 +225,30 @@ end css;
       ELSE
         pl_failure;
       END IF;
+      htp.p('<span id="totalpct"></span>');
       htp.P('</h1>');
       displaySupplement();
       htp.p('<br/>Results:<br/>');
       htp.p('<table id="tabData1" name="tabData1">');
-      htp.p('<tr><th>#</th><th>Status</th><th>Description</th></tr>');
+      htp.p('<tr><th>#</th><th>Status</th><th>Description</th><th>% Success</th></tr>');
 
    END before_results;
-   
+  
+--------------------------------------------------------------------------------
+-- counttests : printing in a of tests after each tested function or proc. 
+--------------------------------------------------------------------------------
+procedure counttests is
+begin
+    htp.p('<tr>');
+    -- this is the end of a program testing.
+    htp.p('<td colspan="4" class="counttest">'||
+    to_char(round(100* gn_current_nb_success / (gn_current_nb_success + gn_current_nb_failure), 2))||
+    '%</td>');
+    htp.p('</tr>');
+    gn_total_fail := gn_total_fail + gn_current_nb_failure;
+    gn_total_success := gn_total_success + gn_current_nb_success;
+end;
+ 
 --------------------------------------------------------------------------------
 -- smartTitle : printing in a smart way the name of the tested proc. or Func. 
 --------------------------------------------------------------------------------
@@ -219,8 +257,17 @@ end css;
    begin
 	 new_testing := substr(utreport.outcome.description, 1, instr(utreport.outcome.description, ':')-1);
 	 if ( new_testing != gv_current_testing ) then
-	   gv_current_testing := new_testing;
-	   htp.p('<tr><td colspan="3"><span class="title"><b>&nbsp;&#155;&nbsp;Testing programme "'||new_testing||'"...</b></span></td></tr>');
+        -- the first time, no testcount...
+        if ( gv_current_testing != '-' ) then
+            countTests();
+        end if; 
+        gv_current_testing := new_testing;
+        gn_current_nb_failure := 0;
+        gn_current_nb_success := 0;
+        -- New program testing
+        htp.p('<tr>');
+            htp.p('<td colspan="4"><span class="title"><b>&nbsp;&#155;&nbsp;Testing program "'||new_testing||'"...</b></span></td>');
+        htp.P('</tr>');
 	 end if;
    end smartTitle;
 
@@ -228,7 +275,7 @@ end css;
 -- smartDesc : returning a smart printing of an failure or success description. 
 --------------------------------------------------------------------------------
    function smartDesc(pdesc varchar2) return varchar2 is
-      my_desc varchar2(4000) := pdesc;
+      my_desc varchar2(4000) := substr(pdesc, instr(pdesc, ':')+1, length(pdesc));
 	  i number := 1;
 	  tag varchar2(20);
 	  lb_tag_opened boolean := false;
@@ -264,7 +311,7 @@ end css;
      smartTitle;     
 	 htp.p('<tr><td class="nb">'||gn_nb||'</td><td>');
      pl_failure;
-     htp.p('</td><td><i>' || smartDesc(utreport.outcome.description) || '</i></td></tr>');
+     htp.p('</td><td>' || smartDesc(utreport.outcome.description) || '</td></tr>');
    END show_failure;
 
 --------------------------------------------------------------------------------
@@ -282,26 +329,30 @@ end css;
 	 
 	 smartTitle;
 	 
-     htp.p ('<tr class="'||odd_even||'"><td class="nb">'||gn_nb||'</td><td>');
+     htp.p ('<tr class="'||odd_even||'"><td class="nb">'||gn_nb||'</td><td class="status">');
 
      IF utreport.outcome.status = 'SUCCESS' THEN
        pl_success;
+       gn_current_nb_success := gn_current_nb_success + 1;
      ELSE
        pl_failure;
+       gn_current_nb_failure := gn_current_nb_failure + 1;
      END IF;
 	 
-     htp.p('</td><td>' ||' - ' || smartDesc(utreport.outcome.description) || '</td></tr>');
+     htp.p('</td><td>' || smartDesc(utreport.outcome.description) || '</td></tr>');
 	 gn_nb := gn_nb + 1;
    END show_result;
 
 --------------------------------------------------------------------------------
 -- after_results : printing some stuff after results are printed
 --------------------------------------------------------------------------------
-   PROCEDURE after_results(run_id IN utr_outcome.run_id%TYPE)
-   IS
-   BEGIN
+   procedure after_results(run_id in utr_outcome.run_id%type)
+   is
+   begin
+     counttests();
      htp.p('</table>');
-   END after_results;
+     displayPercentage();
+   end after_results;
 
 --------------------------------------------------------------------------------
 -- before_errors : printing some stuff before printing errors 
